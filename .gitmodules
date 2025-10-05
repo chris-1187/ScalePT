@@ -1,0 +1,3 @@
+[submodule "spt-worker"]
+	path = spt-worker
+	url = git@github.com:chris-1187/spt-worker.git
