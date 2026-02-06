@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scalept"
+version = "0.1.0"
+description = "Scalable and Distributed Semantic Segmentation of Large-Scale Mobile LiDAR Point Clouds using Point Transformer"
+authors = [
+  { name="cmunz", email="christian.munz@posteo.de" },
+]
+requires-python = ">=3.11"
+dependencies = [
+    "fabric",
+    "omegaconf",
+    "rich",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["scalept*"]

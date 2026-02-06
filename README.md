@@ -1,7 +1,9 @@
 # ScalePT
 
 ```text
-ScalePT/                
+ScalePT/ 
+├── config/                                 # Configuration files
+│   └── cluster_config.yaml                 # Infrastructure setup   
 ├── data/                                   # Datasets
 │   └── kitti/                              # SemanticKITTI dataset
 │       └── dataset/                        
@@ -20,6 +22,12 @@ ScalePT/
 │               │   └── times.txt           # Timestamps for each frame
 │               ├── ...
 │               └── 21/ 
+├── notebooks/                              # Jupyter Notebooks
+│   ├── experiments/                        # Raw metrics
+│   └── scalept_demo.ipynb                  # ScalePT Demo Notebook
+├── scalept/                                # Main ScalePT package
+│   └── infrastructure/
+│       └── orchestrator.py                 # Pipeline functions
 ├── spt-worker/                             # Point Transformer V3 module for worker nodes
 │   ├── spt_worker/                         
 │   │   ├── serialization                   # Modules for 3D points -> 1D sequence conversion
@@ -65,15 +73,20 @@ python -m spt_worker.eval \
     --sequences 04
 
 
-# 1. Create environment
+## Setup
+```
+# Create environment
 conda env create -f environment.yml
 
-# 2. Activate environment
-conda activate spt-env
+# Activate environment
+conda activate scale-pt
 
-export CUDA_HOME=/usr/local/cuda-11.8
-export PATH=$CUDA_HOME/bin:$PATH
-export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+# Install the project
+pip install -e .
+```
+
+
+
 
 # Remove any old install (safe even if not installed)
 pip uninstall -y flash-attn
@@ -95,3 +108,7 @@ pip install . --no-build-isolation
 # Verify:
 python -c "import torch; import flash_attn; print('torch:', torch.version.cuda); print('flash_attn ok')"
 
+
+export CUDA_HOME=/usr/local/cuda-11.8
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH

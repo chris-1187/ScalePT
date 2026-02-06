@@ -1,0 +1,27 @@
+project:
+  name: "ScalePT"
+  user: "cmunz"
+  key_filename: "" # /Users/<username>/.ssh/<key_name>
+
+# Coordinator node (Host 1), owns the nfs
+primary_node:
+  name: "host1"
+  ip: "141.23.40.76"
+  nfs_root: "/mnt/nfs_share"
+
+# Worker nodes
+worker_nodes:
+  - name: "host1"
+    ip: "141.23.40.76"
+  - name: "host2"
+    ip: "141.23.40.77"
+  - name: "host3"
+    ip: "141.23.40.78"
+
+paths:
+  local_worker_repo: "./spt-worker"       # Local worker repo path
+  remote_worker_repo: "~/spt-worker"      # Destination on Ubuntu nodes
+  local_dataset: "./data/kitti/dataset"   # Local path to data
+  remote_dataset: "/mnt/nfs_share/kitti/dataset"
+  remote_experiments: "/mnt/nfs_share/experiments"
+  local_experiments: "./experiments"

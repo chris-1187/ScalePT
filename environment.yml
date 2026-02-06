@@ -4,3 +4,11 @@ channels:
   - defaults
 dependencies:
   - python=3.11
+  - fabric      # ssh
+  - omegaconf   # yaml
+  - rich
+  - ipykernel
+  - ipywidgets
+  - pip
+  - pip:
+    - open3d

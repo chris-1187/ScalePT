@@ -21,4 +21,8 @@ data/*
 !data/README.md
 
 .DS_Store
+*.egg-info/
 train.sh
+
+# Temp
+notebooks/
