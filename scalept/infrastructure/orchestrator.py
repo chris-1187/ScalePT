@@ -40,6 +40,84 @@ class ClusterOrchestrator:
             connect_kwargs={"key_filename": self.cfg.project.key_filename}
         )
 
+    def run_distributed_training(self, nproc_per_node=1):
+        """
+        Launches torchrun on all worker nodes using CUDA 12.1.
+        """
+        console.rule("[bold]Launching Distributed Training (DDP)")
+
+        master_addr = self.cfg.primary_node.ip
+        master_port = "29500"
+        nnodes = len(self.cfg.worker_nodes)
+
+        # Define Log File on NFS
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_dir = "/mnt/nfs_share/kitti/weights"
+        console.print("[dim]Creating output directory on NFS...[/dim]")
+        self.primary.run(f"mkdir -p {base_dir}")
+
+        # Command Construction
+        cmd_template = (
+            "nohup bash -c '"
+            "source ~/miniconda3/etc/profile.d/conda.sh && "
+            "conda activate spt-worker && "
+            "export PATH=/usr/local/cuda-12.1/bin:$PATH && "
+            "export LD_LIBRARY_PATH=/usr/local/cuda-12.1/lib64:$LD_LIBRARY_PATH && "
+            "cd ~/spt-worker && "
+            # Launch
+            "torchrun "
+            f"--nproc_per_node={nproc_per_node} "
+            f"--nnodes={nnodes} "
+            "--node_rank={rank} "  # {rank} is a placeholder to format later
+            f"--master_addr={master_addr} "
+            f"--master_port={master_port} "
+            "-m spt_worker.train "
+            "--data_path /mnt/nfs_share/kitti/dataset "
+            "--labels_path /mnt/nfs_share/kitti/dataset "
+            f"--output_dir {base_dir} "
+            "--sequences 04 "
+            "--batch_size 2 "
+            "--accumulation_steps 4 "
+            "--num_workers 2 "
+            # Redirect output to a specific log file for this rank
+            ">> {base_dir}/train_{timestamp}_rank{rank}.log 2>&1"
+            "' > /dev/null 2>&1 &"  # Detach completely
+        )
+
+        from fabric import Connection
+
+        console.print(f"[yellow]Master Node: {master_addr}[/yellow]")
+        console.print(f"[yellow]Logs stored in: {base_dir}[/yellow]")
+
+        for i, node in enumerate(self.cfg.worker_nodes):
+            rank = i
+            node_ip = node.ip
+
+            cmd = cmd_template.format(
+                rank=rank,
+                base_dir=base_dir,
+                timestamp=timestamp
+            )
+
+            console.print(f"[dim]Launching Rank {rank} on {node_ip}...[/dim]")
+
+            conn = Connection(
+                host=node_ip,
+                user=self.user,
+                connect_kwargs={"key_filename": self.cfg.project.key_filename}
+            )
+
+            conn.run(cmd, hide=True)
+
+        console.print(f"[bold green]✓ Launched! Logs available at:[/bold green]")
+        console.print(f"[black on white] {base_dir}/train_{timestamp}_rank0.log [/black on white]")
+
+
+    ##----------------------------------------------------------------------------
+    ## Deployment Methods
+    ##----------------------------------------------------------------------------
+
     def _resolve_local_path(self, path_str: str) -> str:
         """
         Takes a path from config. If it's relative, anchors it to the Project Root.
@@ -128,36 +206,36 @@ class ClusterOrchestrator:
                 console.print(f"[green]✓ Conda env found on {conn.host}[/green]")
 
     def install_remote_environments(self):
-        """
-        Installs conda environments if missing.
-        """
         console.rule("[bold]Bootstrapping Remote Environments")
 
-        setup_script = (
-            "export PATH=$HOME/miniconda3/bin:$PATH; "
-            "cd ~/spt-worker; "
-            "if ! command -v conda &> /dev/null; then "
-            "   echo 'CRITICAL: Conda not found in ~/miniconda3/bin'; exit 127; "
-            "fi; "
-            "conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main > /dev/null 2>&1 || true; "
-            "conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r > /dev/null 2>&1 || true; "
-            "if conda env list | grep -q 'spt-worker'; then "
-            "   echo '>>> Environment exists. Updating...'; "
-            "   conda env update -f environment.yml --prune; "
-            "else "
-            "   echo '>>> Environment missing. Creating...'; "
-            "   conda env create -f environment.yml; "
+        # CUDA 12.1 check
+        system_check = (
+            "if [ ! -d '/usr/local/cuda-12.1' ]; then "
+            "  echo 'CRITICAL ERROR: System CUDA 12.1 not found in /usr/local/cuda-12.1!'; "
+            "  exit 1; "
             "fi"
         )
 
-        console.print("[yellow]Installing/Updating Conda environments on all nodes...[/yellow]")
-        console.print("[dim](This runs in parallel and may take a few minutes if creating new envs)[/dim]")
+        # Env setup script
+        setup_script = (
+            f"{system_check}; "
+            "source ~/miniconda3/etc/profile.d/conda.sh; "
+            # Conda env
+            "conda activate spt-worker || conda create -n spt-worker python=3.11 -y; "
+            "conda activate spt-worker; "
+            "conda env update -n spt-worker -f ~/spt-worker/environment.yml --prune; "
+            # Pytorch setup
+            "pip install torch==2.1.0+cu118 torchvision==0.16.0+cu118 torchaudio==2.1.0+cu118 --index-url https://download.pytorch.org/whl/cu118; "
+            "pip install spconv-cu118; "
+            "pip install torch-scatter -f https://data.pyg.org/whl/torch-2.1.0+cu118.html; "
+            "pip install torch_geometric; "
+        )
+
+        console.print("[yellow]Installing CUDA 12.1 + PyTorch 11.8...[/yellow]")
 
         try:
-            # Run on all nodes
             self.group.run(setup_script, hide=True)
             console.print("[green]✓ All environments ready.[/green]")
-
         except Exception as e:
             console.print(f"[bold red]✗ Installation failed![/bold red]")
             if hasattr(e, 'result'):
@@ -166,8 +244,6 @@ class ClusterOrchestrator:
                         console.print(f"[red]--- Failure Log for {conn.host} ---[/red]")
                         if hasattr(outcome, 'result'):
                             console.print(outcome.result.stderr)
-                        else:
-                            console.print(str(outcome))
             raise e
 
     def ensure_remote_dirs(self):
