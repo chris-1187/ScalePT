@@ -13,12 +13,18 @@ class ClusterOrchestrator:
         current_file_path = Path(__file__).resolve()
         self.project_root = current_file_path.parent.parent.parent
         config_dir = self.project_root / "config"
-        config_path = config_dir / "cluster_config.yaml"
+        config_path = config_dir / "config.yaml"
 
         if not config_path.exists():
             raise FileNotFoundError(f"Critical: Config not found at {config_path}")
 
         self.cfg = OmegaConf.load(config_path)
+
+        self.base_dir = f"{self.cfg.primary_node.nfs_root}/{self.cfg.args.dataset}"
+        self.remote_dataset_dir = f"{self.base_dir}/dataset"
+        self.remote_experiments_dir = f"{self.base_dir}/experiments"
+        self.remote_weights_dir = f"{self.base_dir}/weights"
+
         self.cfg.paths.local_worker_repo = self._resolve_local_path(self.cfg.paths.local_worker_repo)
         self.cfg.paths.local_dataset = self._resolve_local_path(self.cfg.paths.local_dataset)
         if 'local_experiments' in self.cfg.paths:
@@ -40,22 +46,23 @@ class ClusterOrchestrator:
             connect_kwargs={"key_filename": self.cfg.project.key_filename}
         )
 
-    def run_distributed_training(self, nproc_per_node=1):
+    def run_distributed_training(self):
         """
         Launches torchrun on all worker nodes using CUDA 12.1.
         """
         console.rule("[bold]Launching Distributed Training (DDP)")
 
-        master_addr = self.cfg.primary_node.ip
-        master_port = "29500"
-        nnodes = len(self.cfg.worker_nodes)
-
-        # Define Log File on NFS
         import datetime
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        base_dir = "/mnt/nfs_share/kitti/weights"
-        console.print("[dim]Creating output directory on NFS...[/dim]")
-        self.primary.run(f"mkdir -p {base_dir}")
+
+        master_addr = self.cfg.primary_node.ip
+        master_port = "29500"
+        nnodes = self.cfg.args.nnodes_used
+        nproc_per_node = self.cfg.args.nproc_per_node
+
+        self.primary.run(f"mkdir -p {self.remote_weights_dir}")
+        experiment_dir = f"{self.remote_experiments_dir}/{timestamp}"
+        self.primary.run(f"mkdir -p {experiment_dir}")
 
         # Command Construction
         cmd_template = (
@@ -69,26 +76,25 @@ class ClusterOrchestrator:
             "torchrun "
             f"--nproc_per_node={nproc_per_node} "
             f"--nnodes={nnodes} "
-            "--node_rank={rank} "  # {rank} is a placeholder to format later
+            "--node_rank={rank} "
             f"--master_addr={master_addr} "
             f"--master_port={master_port} "
             "-m spt_worker.train "
-            "--data_path /mnt/nfs_share/kitti/dataset "
-            "--labels_path /mnt/nfs_share/kitti/dataset "
-            f"--output_dir {base_dir} "
+            f"--data_path {self.remote_dataset_dir} "
+            f"--labels_path {self.remote_dataset_dir} "
+            f"--output_dir {experiment_dir} "
             "--sequences 04 "
             "--batch_size 2 "
             "--accumulation_steps 4 "
             "--num_workers 2 "
             # Redirect output to a specific log file for this rank
-            ">> {base_dir}/train_{timestamp}_rank{rank}.log 2>&1"
+            ">> {experiment_dir}/train_{timestamp}_rank{rank}.log 2>&1"
             "' > /dev/null 2>&1 &"  # Detach completely
         )
 
         from fabric import Connection
 
         console.print(f"[yellow]Master Node: {master_addr}[/yellow]")
-        console.print(f"[yellow]Logs stored in: {base_dir}[/yellow]")
 
         for i, node in enumerate(self.cfg.worker_nodes):
             rank = i
@@ -96,7 +102,7 @@ class ClusterOrchestrator:
 
             cmd = cmd_template.format(
                 rank=rank,
-                base_dir=base_dir,
+                experiment_dir=experiment_dir,
                 timestamp=timestamp
             )
 
@@ -110,8 +116,8 @@ class ClusterOrchestrator:
 
             conn.run(cmd, hide=True)
 
-        console.print(f"[bold green]✓ Launched! Logs available at:[/bold green]")
-        console.print(f"[black on white] {base_dir}/train_{timestamp}_rank0.log [/black on white]")
+        console.print(f"[bold green]✓ All workers launched! Logs available at:[/bold green]")
+        console.print(f"[yellow]Weights, metrics and logs available at: {experiment_dir}[/yellow]")
 
 
     ##----------------------------------------------------------------------------
@@ -174,14 +180,17 @@ class ClusterOrchestrator:
         console.rule("[bold]Syncing Dataset to NFS")
 
         local_data = os.path.abspath(self.cfg.paths.local_dataset)
-        remote_data = self.cfg.paths.remote_dataset
+        remote_data = f"{self.base_dir}/dataset"
+
         host = self.cfg.primary_node.ip
 
         console.print(f"[yellow]Target: {host}:{remote_data}[/yellow]")
         console.print("[dim]This may take a while if changes are large...[/dim]")
 
         # Ensure remote directory exists
-        self.primary.run(f"mkdir -p {remote_data}")
+        self.primary.run(f"mkdir -p {self.remote_dataset_dir}")
+        self.primary.run(f"mkdir -p {self.remote_weights_dir}")
+        self.primary.run(f"mkdir -p {self.remote_experiments_dir}")
 
         cmd = (
             f"rsync -avz --progress -e 'ssh -i {self.cfg.project.key_filename}' "

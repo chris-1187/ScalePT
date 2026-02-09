@@ -3,6 +3,13 @@ project:
   user: "cmunz"
   key_filename: "" # /Users/<username>/.ssh/<key_name>
 
+## Run configuration and hyperparameters
+args:
+  nnodes_used: 3
+  nproc_per_node: 1
+  dataset: "kitti"
+
+## Infrastructure
 # Coordinator node (Host 1), owns the nfs
 primary_node:
   name: "host1"

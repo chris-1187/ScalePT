@@ -3,7 +3,7 @@
 ```text
 ScalePT/ 
 ├── config/                                 # Configuration files
-│   └── cluster_config.yaml                 # Infrastructure setup   
+│   └── config.yaml                         # ScalePT config   
 ├── data/                                   # Datasets
 │   └── kitti/                              # SemanticKITTI dataset
 │       └── dataset/                        
