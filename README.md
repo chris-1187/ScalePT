@@ -26,6 +26,8 @@ ScalePT/
 │   ├── experiments/                        # Raw metrics
 │   └── scalept_demo.ipynb                  # ScalePT Demo Notebook
 ├── scalept/                                # Main ScalePT package
+│   ├── analysis/                           # Analysis modules
+│   │   └── analyzer.py                     # Plots etc.
 │   └── infrastructure/
 │       └── orchestrator.py                 # Pipeline functions
 ├── spt-worker/                             # Point Transformer V3 module for worker nodes

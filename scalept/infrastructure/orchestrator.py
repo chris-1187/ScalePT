@@ -23,7 +23,6 @@ class ClusterOrchestrator:
         self.base_dir = f"{self.cfg.primary_node.nfs_root}/{self.cfg.args.dataset}"
         self.remote_dataset_dir = f"{self.base_dir}/dataset"
         self.remote_experiments_dir = f"{self.base_dir}/experiments"
-        self.remote_weights_dir = f"{self.base_dir}/weights"
 
         self.cfg.paths.local_worker_repo = self._resolve_local_path(self.cfg.paths.local_worker_repo)
         self.cfg.paths.local_dataset = self._resolve_local_path(self.cfg.paths.local_dataset)
@@ -46,7 +45,9 @@ class ClusterOrchestrator:
             connect_kwargs={"key_filename": self.cfg.project.key_filename}
         )
 
-    def run_distributed_training(self):
+        self.check_connectivity()
+
+    def run_distributed_training(self, sampling_strategy: str = 'hilbert', run_name: str = ""):
         """
         Launches torchrun on all worker nodes using CUDA 12.1.
         """
@@ -55,14 +56,18 @@ class ClusterOrchestrator:
         import datetime
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
+        suffix = f"_{run_name}" if run_name else ""
+        exp_folder_name = f"{timestamp}_{sampling_strategy}{suffix}"
         master_addr = self.cfg.primary_node.ip
         master_port = "29500"
         nnodes = self.cfg.args.nnodes_used
         nproc_per_node = self.cfg.args.nproc_per_node
 
-        self.primary.run(f"mkdir -p {self.remote_weights_dir}")
-        experiment_dir = f"{self.remote_experiments_dir}/{timestamp}"
-        self.primary.run(f"mkdir -p {experiment_dir}")
+        experiment_dir = f"{self.remote_experiments_dir}/{exp_folder_name}"
+        self.primary.run(f"mkdir -p {experiment_dir}/logs")
+        self.primary.run(f"mkdir -p {experiment_dir}/weights")
+
+        console.print(f"[magenta]Sampling Strategy: {sampling_strategy}[/magenta]")
 
         # Command Construction
         cmd_template = (
@@ -83,13 +88,14 @@ class ClusterOrchestrator:
             f"--data_path {self.remote_dataset_dir} "
             f"--labels_path {self.remote_dataset_dir} "
             f"--output_dir {experiment_dir} "
-            "--sequences 04 "
-            "--batch_size 2 "
+            f"--sampling_strategy {sampling_strategy} "
+            "--sequences 00 01 02 03 04 05 06 07 09 10 "
             "--accumulation_steps 4 "
             "--num_workers 2 "
+            "--epochs 40 "
             # Redirect output to a specific log file for this rank
-            ">> {experiment_dir}/train_{timestamp}_rank{rank}.log 2>&1"
-            "' > /dev/null 2>&1 &"  # Detach completely
+            ">> {experiment_dir}/logs/train_{timestamp}_rank{rank}.log 2>&1"
+            "' > /dev/null 2>&1 &"  # Detach
         )
 
         from fabric import Connection
@@ -118,6 +124,61 @@ class ClusterOrchestrator:
 
         console.print(f"[bold green]✓ All workers launched! Logs available at:[/bold green]")
         console.print(f"[yellow]Weights, metrics and logs available at: {experiment_dir}[/yellow]")
+
+    def run_evaluation(self, experiment_path_relative=None, chunk_size=40000, overlap=2000, sampling_strategy='hilbert',
+                       sequences='08'):
+        """
+        Runs evaluation on the Primary Node (Host 1).
+        If no path provided, tries to find the most recent experiment.
+        """
+        console.rule("[bold]Launching Inference Evaluation")
+
+        if experiment_path_relative:
+            remote_exp_dir = f"{self.remote_experiments_dir}/{experiment_path_relative}"
+        else:
+            cmd_find = f"ls -td {self.remote_experiments_dir}/*/ | head -1"
+            res = self.primary.run(cmd_find, hide=True)
+            remote_exp_dir = res.stdout.strip()
+            if not remote_exp_dir:
+                console.print("[red]No experiments found![/red]")
+                return
+
+        console.print(f"[yellow]Evaluating Experiment: {remote_exp_dir}[/yellow]")
+
+        # Check for weights
+        weights_path = f"{remote_exp_dir.rstrip('/')}/weights/model_weights.pt"
+        if self.primary.run(f"[ -f {weights_path} ]", warn=True, hide=True).failed:
+            console.print(f"[red]No model_weights.pt found at {weights_path}[/red]")
+            return
+
+        inference_id = f"eval_overlap{overlap}_{sampling_strategy}_seq{sequences}"
+
+        # Construct Inference Command
+        # Sequence 08 (Validation) by default
+        cmd = (
+            "source ~/miniconda3/etc/profile.d/conda.sh && "
+            "conda activate spt-worker && "
+            "export PATH=/usr/local/cuda-12.1/bin:$PATH && "
+            "cd ~/spt-worker && "
+            "python -m spt_worker.inference "
+            f"--data_path {self.remote_dataset_dir} "
+            f"--labels_path {self.remote_dataset_dir} "
+            f"--checkpoint_path {weights_path} "
+            f"--output_dir {remote_exp_dir} "
+            f"--inference_id {inference_id} "
+            f"--sequences {sequences} "
+            f"--num_workers 4 "
+            f"--chunk_size {chunk_size} "
+            f"--overlap_size {overlap} "
+            f"--sampling_strategy {sampling_strategy}"
+        )
+
+        # Run on Primary Node
+        console.print(f"[dim]Running inference on {self.cfg.primary_node.ip}...[/dim]") # TODO: distributed inference
+        self.primary.run(cmd)
+
+        console.print("[dim]Inference complete. Pulling latest metrics to local machine...[/dim]")
+        self.sync_experiments_down()
 
 
     ##----------------------------------------------------------------------------
@@ -159,7 +220,7 @@ class ClusterOrchestrator:
         remote_path = self.cfg.paths.remote_worker_repo
         exclude_flags = "--exclude '.git' --exclude '__pycache__' --exclude '*.pyc' --exclude '.DS_Store'"
 
-        console.print(f"[dim]Syncing {local_path} -> {remote_path}...[/dim]")
+        console.print(f"[yellow]Syncing {local_path} -> {remote_path}...[/yellow]")
 
         for node in self.cfg.worker_nodes:
             ip = node.ip
@@ -200,21 +261,7 @@ class ClusterOrchestrator:
         os.system(cmd)
         console.print("[bold green]✓ Dataset sync complete.[/bold green]")
 
-    def verify_remote_environment(self):
-        """
-        Checks if the conda environment is active/exists on workers.
-        """
-        console.rule("[bold]Verifying Environments")
-
-        results = self.group.run("ls -d ~/miniconda3/envs/spt-worker || echo 'MISSING'", hide=True)
-
-        for conn, res in results.items():
-            if "MISSING" in res.stdout:
-                console.print(f"[red]✗ Conda env missing on {conn.host}[/red]")
-            else:
-                console.print(f"[green]✓ Conda env found on {conn.host}[/green]")
-
-    def install_remote_environments(self):
+    def setup_remote_environments(self):
         console.rule("[bold]Bootstrapping Remote Environments")
 
         # CUDA 12.1 check
@@ -240,10 +287,17 @@ class ClusterOrchestrator:
             "pip install torch_geometric; "
         )
 
-        console.print("[yellow]Installing CUDA 12.1 + PyTorch 11.8...[/yellow]")
+        console.print("[yellow]Installing CUDA + PyTorch 11.8...[/yellow]")
 
         try:
             self.group.run(setup_script, hide=True)
+            results = self.group.run("ls -d ~/miniconda3/envs/spt-worker || echo 'MISSING'", hide=True)
+            for conn, res in results.items():
+                if "MISSING" in res.stdout:
+                    console.print(f"[red]✗ Conda env missing on {conn.host}[/red]")
+                    raise Exception(f"Conda env missing on {conn.host}")
+                else:
+                    console.print(f"[green]✓ Conda env active on {conn.host}[/green]")
             console.print("[green]✓ All environments ready.[/green]")
         except Exception as e:
             console.print(f"[bold red]✗ Installation failed![/bold red]")
