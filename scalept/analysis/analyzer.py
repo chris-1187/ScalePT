@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
 
+from pandas.io.formats.style import Styler
+
 # KITTI class names mapped to their evaluation indices
 CLASS_NAMES = [
     "car", "bicycle", "motorcycle", "truck", "other-vehicle", "person", "bicyclist",
@@ -29,35 +31,44 @@ class ExperimentAnalyzer:
             if not exp_dir.is_dir():
                 continue
 
-            metrics_file = exp_dir / "metrics.jsonl"
-            if not metrics_file.exists():
-                continue
-
             exp_name = exp_dir.name
             training_logs = []
             evaluation_logs = []
 
-            with open(metrics_file, 'r') as f:
-                for line in f:
-                    try:
-                        data = json.loads(line.strip())
-                        if "event" in data and data["event"] == "evaluation_completed":
-                            evaluation_logs.append(data)
-                        elif "epoch" in data:
-                            training_logs.append(data)
-                    except json.JSONDecodeError:
-                        continue
+            # training
+            metrics_file = exp_dir / "metrics.jsonl"
+            if metrics_file.exists():
+                with open(metrics_file, 'r') as f:
+                    for line in f:
+                        try:
+                            data = json.loads(line.strip())
+                            if "epoch" in data:
+                                training_logs.append(data)
+                        except json.JSONDecodeError:
+                            continue
+
+            # inference
+            inference_dir = exp_dir / "inference"
+            if inference_dir.exists() and inference_dir.is_dir():
+                for eval_run_dir in inference_dir.iterdir():
+                    if eval_run_dir.is_dir():
+                        eval_file = eval_run_dir / "evaluation_metrics.json"
+                        if eval_file.exists():
+                            try:
+                                with open(eval_file, 'r') as f:
+                                    eval_data = json.load(f)
+                                    evaluation_logs.append(eval_data)
+                            except json.JSONDecodeError:
+                                continue
+
+
 
             self.experiments[exp_name] = {
                 "training": training_logs,
                 "evaluations": evaluation_logs
             }
 
-    def get_evaluation_summary_table(self) -> pd.DataFrame:
-        """
-        Returns a Pandas DataFrame summarizing the latest evaluation
-        of all experiments.
-        """
+    def get_evaluations(self) -> pd.DataFrame:
         rows = []
         for exp_name, data in self.experiments.items():
             if not data["evaluations"]:
@@ -71,7 +82,6 @@ class ExperimentAnalyzer:
             rows.append({
                 "Experiment ID": exp_name,
                 "Strategy": params.get("sampling_strategy", "N/A"),
-                "Chunk Size": params.get("chunk_size", "N/A"),
                 "mIoU (%)": results.get("mean_iou", np.nan),
                 "mAcc (%)": results.get("mean_accuracy", np.nan),
                 "OA (%)": results.get("overall_accuracy", np.nan),
@@ -82,6 +92,33 @@ class ExperimentAnalyzer:
         if not df.empty:
             df = df.sort_values(by="mIoU (%)", ascending=False).reset_index(drop=True)
         return df
+
+    def get_evaluation(self, id: str) -> Styler:
+        rows = []
+        for exp_name, data in self.experiments.items():
+            if not data["evaluations"] and exp_name != id:
+                continue
+
+            # Take most recent evaluation
+            latest_eval = data["evaluations"][-1]
+            results = latest_eval.get("results", {})
+            per_class_iou = results.get("per_class_iou", {})
+            per_class_acc = results.get("per_class_acc", {})
+
+            for c in per_class_iou:
+                class_idx = int(c)
+                class_name = CLASS_NAMES[class_idx] if class_idx < len(CLASS_NAMES) else f"Unknown ({c})"
+
+                rows.append({
+                    "Class": class_name,
+                    "Class IoU (%)": per_class_iou[c],
+                    "Class Acc (%)": per_class_acc[c],
+                })
+
+        df = pd.DataFrame(rows)
+        df_cap = df.style.set_caption(f"<h4><b>{id.split('_', 2)[2]}</b></h4>")
+
+        return df_cap
 
     def plot_speed_vs_accuracy(self, figsize=(8, 5)):
         """

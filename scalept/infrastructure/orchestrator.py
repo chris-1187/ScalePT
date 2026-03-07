@@ -318,29 +318,113 @@ class ClusterOrchestrator:
 
     def sync_experiments_down(self):
         """
-        Downloads the experiment logs/metrics from NFS to Local.
+        Downloads the experiment logs/metrics from NFS to local
         """
         console.rule("[bold]Syncing Experiments (Remote -> Local)")
 
-        check = self.primary.run(f"[ -d {self.cfg.paths.remote_experiments} ]", warn=True, hide=True)
+        check = self.primary.run(f"[ -d {self.remote_experiments_dir} ]", warn=True, hide=True)
         if check.failed:
             console.print("[yellow]! No experiment folder found. Creating it now...[/yellow]")
             self.ensure_remote_dirs()
             console.print("[yellow]! Zero experiments available to sync.[/yellow]")
             return
 
-        local_dir = os.path.abspath(self.cfg.paths.local_experiments)
+        local_dir = os.path.join(self.project_root, "notebooks", "experiments")
         os.makedirs(local_dir, exist_ok=True)
 
         cmd = (
             f"rsync -az --exclude '*.pt' -e 'ssh -i {self.cfg.project.key_filename}' "
-            f"{self.user}@{self.cfg.primary_node.ip}:{self.cfg.paths.remote_experiments}/ {local_dir}/"
+            f"{self.user}@{self.cfg.primary_node.ip}:{self.remote_experiments_dir}/ {local_dir}/"
         )
 
         import subprocess
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
         if result.returncode == 0:
-            console.print("[green]✓ Experiments synced locally.[/green]")
+            console.print(f"[green]✓ Experiments synced locally to {local_dir}.[/green]")
         else:
             console.print(f"[red]Sync warning: {result.stderr}[/red]")
+
+
+    def resume_distributed_training(self, experiment_folder_name: str):
+        """
+        Resumes a crashed or stopped training run from the latest checkpoint
+        """
+        console.rule(f"[bold]Resuming Distributed Training: {experiment_folder_name}")
+
+        experiment_dir = f"{self.remote_experiments_dir}/{experiment_folder_name}"
+        weights_dir = f"{experiment_dir}/weights"
+
+        if self.primary.run(f"[ -d {experiment_dir} ]", warn=True, hide=True).failed:
+            console.print(f"[red]Critical: Experiment directory not found: {experiment_dir}[/red]")
+            return
+
+        cmd_find_weights = f"ls {weights_dir}/model_weights_epoch_*.pt | sort -V | tail -n 1"
+        res = self.primary.run(cmd_find_weights, warn=True, hide=True)
+        latest_checkpoint = res.stdout.strip()
+
+        if not latest_checkpoint:
+            console.print(f"[red]Critical: No epoch checkpoints found in {weights_dir}[/red]")
+            return
+
+        console.print(f"[green]Found latest checkpoint:[/green] {latest_checkpoint}")
+
+        # get the original config
+        res_config = self.primary.run(f"cat {experiment_dir}/run_config.json", hide=True)
+        import json
+        try:
+            config_data = json.loads(res_config.stdout)
+            sampling_strategy = config_data["arguments"]["sampling_strategy"]
+            sequences = " ".join(config_data["arguments"]["sequences"])
+            epochs = config_data["arguments"]["epochs"]
+        except Exception as e:
+            console.print(f"[red]Failed to parse run_config.json: {e}[/red]")
+            return
+
+        import datetime
+        resume_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        master_addr = self.cfg.primary_node.ip
+        master_port = "29500"
+        nnodes = self.cfg.args.nnodes_used
+        nproc_per_node = self.cfg.args.nproc_per_node
+
+        cmd_template = (
+            "nohup bash -c '"
+            "source ~/miniconda3/etc/profile.d/conda.sh && "
+            "conda activate spt-worker && "
+            "export PATH=/usr/local/cuda-12.1/bin:$PATH && "
+            "export LD_LIBRARY_PATH=/usr/local/cuda-12.1/lib64:$LD_LIBRARY_PATH && "
+            "cd ~/spt-worker && "
+            "torchrun "
+            f"--nproc_per_node={nproc_per_node} "
+            f"--nnodes={nnodes} "
+            "--node_rank={rank} "
+            f"--master_addr={master_addr} "
+            f"--master_port={master_port} "
+            "-m spt_worker.train "
+            f"--data_path {self.remote_dataset_dir} "
+            f"--labels_path {self.remote_dataset_dir} "
+            f"--output_dir {experiment_dir} "
+            f"--sampling_strategy {sampling_strategy} "
+            f"--sequences {sequences} "
+            "--accumulation_steps 4 "
+            "--num_workers 2 "
+            f"--epochs {epochs} "
+            f"--resume {latest_checkpoint} "
+            f">> {experiment_dir}/logs/resume_{resume_timestamp}_rank{{rank}}.log 2>&1"
+            "' > /dev/null 2>&1 &"
+        )
+
+        for i, node in enumerate(self.cfg.worker_nodes):
+            rank = i
+            node_ip = node.ip
+            cmd = cmd_template.format(rank=rank)
+            console.print(f"[dim]Launching Resume Rank {rank} on {node_ip}...[/dim]")
+
+            from fabric import Connection
+            conn = Connection(host=node_ip, user=self.user,
+                              connect_kwargs={"key_filename": self.cfg.project.key_filename})
+            conn.run(cmd, hide=True)
+
+        console.print("[bold green]✓ Training resumed successfully![/bold green]")
