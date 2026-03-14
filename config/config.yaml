@@ -20,10 +20,16 @@ primary_node:
 worker_nodes:
   - name: "host1"
     ip: "141.23.40.76"
+    training_cap: 10240
+    inference_cap: 10240
   - name: "host2"
     ip: "141.23.40.77"
+    training_cap: 10240
+    inference_cap: 10240
   - name: "host3"
     ip: "141.23.40.78"
+    training_cap: 10240
+    inference_cap: 10240
 
 paths:
   local_worker_repo: "./spt-worker"       # Local worker repo path

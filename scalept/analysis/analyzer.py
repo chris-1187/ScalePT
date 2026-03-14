@@ -57,6 +57,7 @@ class ExperimentAnalyzer:
                             try:
                                 with open(eval_file, 'r') as f:
                                     eval_data = json.load(f)
+                                    eval_data["inference_id"] = eval_run_dir.name
                                     evaluation_logs.append(eval_data)
                             except json.JSONDecodeError:
                                 continue
@@ -74,49 +75,68 @@ class ExperimentAnalyzer:
             if not data["evaluations"]:
                 continue
 
-            # Take the most recent evaluation
-            latest_eval = data["evaluations"][-1]
-            params = latest_eval.get("parameters", {})
-            results = latest_eval.get("results", {})
+            for eval_data in data["evaluations"]:
+                params = eval_data.get("parameters", {})
+                results = eval_data.get("results", {})
 
-            rows.append({
-                "Experiment ID": exp_name,
-                "Strategy": params.get("sampling_strategy", "N/A"),
-                "mIoU (%)": results.get("mean_iou", np.nan),
-                "mAcc (%)": results.get("mean_accuracy", np.nan),
-                "OA (%)": results.get("overall_accuracy", np.nan),
-                "Latency (ms)": results.get("average_latency_ms", np.nan)
-            })
+                inf_id = eval_data.get("inference_id", "unknown_eval")
+
+                rows.append({
+                    "Experiment ID": f"{inf_id}",
+                    "Strategy": params.get("sampling_strategy", "N/A"),
+                    "mIoU (%)": results.get("mean_iou", np.nan),
+                    "mAcc (%)": results.get("mean_accuracy", np.nan),
+                    "OA (%)": results.get("overall_accuracy", np.nan),
+                    "Latency (ms)": results.get("average_latency_ms", np.nan)
+                })
 
         df = pd.DataFrame(rows)
         if not df.empty:
             df = df.sort_values(by="mIoU (%)", ascending=False).reset_index(drop=True)
         return df
 
-    def get_evaluation(self, id: str) -> Styler:
+    def get_evaluation(self, experiment_id: str, inference_id: str) -> Styler:
         rows = []
-        for exp_name, data in self.experiments.items():
-            if not data["evaluations"] and exp_name != id:
-                continue
 
-            # Take most recent evaluation
-            latest_eval = data["evaluations"][-1]
-            results = latest_eval.get("results", {})
-            per_class_iou = results.get("per_class_iou", {})
-            per_class_acc = results.get("per_class_acc", {})
+        # check if exists
+        if experiment_id not in self.experiments:
+            print(f"Experiment {experiment_id} not found.")
+            return pd.DataFrame().style
 
-            for c in per_class_iou:
-                class_idx = int(c)
-                class_name = CLASS_NAMES[class_idx] if class_idx < len(CLASS_NAMES) else f"Unknown ({c})"
+        data = self.experiments[experiment_id]
+        if not data["evaluations"]:
+            print(f"No evaluations found for {experiment_id}.")
+            return pd.DataFrame().style
 
-                rows.append({
-                    "Class": class_name,
-                    "Class IoU (%)": per_class_iou[c],
-                    "Class Acc (%)": per_class_acc[c],
-                })
+        target_eval = None
+        for eval_data in data["evaluations"]:
+            if eval_data.get("inference_id") == inference_id:
+                target_eval = eval_data
+                break
+
+        if target_eval is None:
+            print(f"Inference run '{inference_id}' not found in experiment '{experiment_id}'.")
+            return pd.DataFrame().style
+
+        # get metrics
+        results = target_eval.get("results", {})
+        per_class_iou = results.get("per_class_iou", {})
+        per_class_acc = results.get("per_class_acc", {})
+
+        for c in per_class_iou:
+            class_idx = int(c)
+            class_name = CLASS_NAMES[class_idx] if class_idx < len(CLASS_NAMES) else f"Unknown ({c})"
+
+            rows.append({
+                "Class": class_name,
+                "Class IoU (%)": per_class_iou[c],
+                "Class Acc (%)": per_class_acc[c],
+            })
 
         df = pd.DataFrame(rows)
-        df_cap = df.style.set_caption(f"<h4><b>{id.split('_', 2)[2]}</b></h4>")
+
+        short_exp_id = experiment_id.split('_', 2)[-1] if '_' in experiment_id else experiment_id
+        df_cap = df.style.set_caption(f"<h4>Exp: {short_exp_id} <br><br> Eval: {inference_id}</h4><br>")
 
         return df_cap
 
