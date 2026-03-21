@@ -141,6 +141,9 @@ class ClusterOrchestrator:
     def run_evaluation(self,
                        experiment_path_relative=None,
                        sampling_strategy='hilbert',
+                       fusion_strategy='logit_average',
+                       fusion_method='soft',
+                       mc_passes=10,
                        sequence='08',
                        overlap=2000 ):
         """
@@ -192,6 +195,9 @@ class ClusterOrchestrator:
             "--chunk_size {chunk_size} "
             f"--overlap_size {overlap} "
             f"--sampling_strategy {sampling_strategy} "
+            f"--fusion_strategy {fusion_strategy} "
+            f"--fusion_method {fusion_method} "
+            f"--mc_passes {mc_passes} "
             "' > /dev/null 2>&1 &"
         )
 
