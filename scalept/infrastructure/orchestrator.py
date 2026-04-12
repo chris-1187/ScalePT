@@ -169,10 +169,11 @@ class ClusterOrchestrator:
             console.print(f"[red]No model_weights.pt found at {weights_path}[/red]")
             return
 
-        inference_id = f"eval_{sampling_strategy}_seq{sequence}_overlap{overlap}"
+        inference_id = f"eval_{sampling_strategy}_seq{sequence}"
 
         total_frames = self.get_total_frames(sequence=sequence)
         workload = self.get_workload_distribution(total_frames)
+        self.primary.run(f"mkdir -p {remote_exp_dir}/inference/{inference_id}/inference_logs")
 
         # inference command
         inference_cmd = (
@@ -198,7 +199,7 @@ class ClusterOrchestrator:
             f"--fusion_strategy {fusion_strategy} "
             f"--fusion_method {fusion_method} "
             f"--mc_passes {mc_passes} "
-            "' > /dev/null 2>&1 &"
+            f"' > {remote_exp_dir}/inference/{inference_id}/inference_logs/{inference_id}_{{node_name}}.log 2>&1 &"
         )
 
         console.print("[yellow]Launching inference workers:[/yellow]")
@@ -213,7 +214,7 @@ class ClusterOrchestrator:
                 start_idx=data['start_idx'],
                 end_idx=data['end_idx'],
                 node_name=node_name,
-                chunk_size= self.node_config[node_name]['inference_cap']
+                chunk_size= 10240
             )
 
             conn = Connection(
