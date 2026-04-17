@@ -21,15 +21,15 @@ worker_nodes:
   - name: "host1"
     ip: "141.23.40.76"
     training_cap: 10240 # points
-    inference_cap: 364 # empirical throughput
+    inference_cap: 400 # empirical throughput
   - name: "host2"
     ip: "141.23.40.77"
     training_cap: 10240 # points
-    inference_cap: 380 # empirical throughput
+    inference_cap: 400 # empirical throughput
   - name: "host3"
     ip: "141.23.40.78"
     training_cap: 10240 # points
-    inference_cap: 256 # empirical throughput
+    inference_cap: 210 # empirical throughput
 
 paths:
   local_worker_repo: "./spt-worker"       # Local worker repo path

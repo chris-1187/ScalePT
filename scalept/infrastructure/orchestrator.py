@@ -142,7 +142,7 @@ class ClusterOrchestrator:
                        experiment_path_relative=None,
                        sampling_strategy='hilbert',
                        fusion_strategy='logit_average',
-                       fusion_method='soft',
+                       fusion_method='hard',
                        mc_passes=10,
                        sequence='08',
                        overlap=2000 ):
@@ -169,7 +169,7 @@ class ClusterOrchestrator:
             console.print(f"[red]No model_weights.pt found at {weights_path}[/red]")
             return
 
-        inference_id = f"eval_{sampling_strategy}_seq{sequence}"
+        inference_id = f"eval_{sampling_strategy}_{fusion_strategy}"
 
         total_frames = self.get_total_frames(sequence=sequence)
         workload = self.get_workload_distribution(total_frames)
@@ -541,32 +541,41 @@ class ClusterOrchestrator:
         all_finished = False
 
         while not all_finished:
-            # get how many .label files have been written
-            cmd_count = f"find {predictions_dir} -name '*.label' | wc -l"
-            res = self.primary.run(cmd_count, warn=True, hide=True)
+            try:
+                # get how many .label files have been written
+                cmd_count = f"find {predictions_dir} -name '*.label' | wc -l"
+                res = self.primary.run(cmd_count, warn=True, hide=True)
 
-            if res.ok:
-                completed_frames = int(res.stdout.strip())
-                # tqdm needs the difference (delta) to update correctly
-                delta = completed_frames - last_completed
-                if delta > 0:
-                    pbar.update(delta)
-                    last_completed = completed_frames
+                if res.ok:
+                    completed_frames = int(res.stdout.strip())
+                    # tqdm needs the difference (delta) to update correctly
+                    delta = completed_frames - last_completed
+                    if delta > 0:
+                        pbar.update(delta)
+                        last_completed = completed_frames
 
-            # Check if all JSON metric files are present
-            finished_nodes = 0
-            for node_name in node_names:
-                expected_file = f"{inference_dir}/evaluation_metrics_{node_name}.json"
-                if self.primary.run(f"[ -f {expected_file} ]", warn=True, hide=True).ok:
-                    finished_nodes += 1
+                # Check if all JSON metric files are present
+                finished_nodes = 0
+                for node_name in node_names:
+                    expected_file = f"{inference_dir}/evaluation_metrics_{node_name}.json"
+                    if self.primary.run(f"[ -f {expected_file} ]", warn=True, hide=True).ok:
+                        finished_nodes += 1
 
-            if finished_nodes == len(node_names):
-                all_finished = True
-                remaining = total_frames - last_completed
-                if remaining > 0:
-                    pbar.update(remaining)
-            else:
+                if finished_nodes == len(node_names):
+                    all_finished = True
+                    remaining = total_frames - last_completed
+                    if remaining > 0:
+                        pbar.update(remaining)
+                else:
+                    time.sleep(5)
+            except (EOFError, Exception) as e:
+                # if ssh drops, wait and try reconnecting
                 time.sleep(5)
+                self.primary = Connection(
+                    host=self.cfg.primary_node.ip,
+                    user=self.user,
+                    connect_kwargs={"key_filename": self.cfg.project.key_filename}
+                )
 
         pbar.close()
 
@@ -577,9 +586,15 @@ class ClusterOrchestrator:
 
         # Aggregate metrics from all nodes
         total_hist = np.zeros((19, 19))
-        total_latency_sec = 0.0
-        total_frames = 0
+        total_sampling_sec = 0.0
+        total_model_sec = 0.0
+        total_fusion_sec = 0.0
+        total_e2e_sec = 0.0
+        total_frames_processed = 0
         first_file_params = {}
+        cleanup_iterations = 0
+        total_oversampling = 0.0
+        total_interpolated_percentage = 0.0
 
         for node_name in node_names:
             file_path = f"{inference_dir}/evaluation_metrics_{node_name}.json"
@@ -590,13 +605,30 @@ class ClusterOrchestrator:
                 first_file_params = data["parameters"]
 
             total_hist += np.array(data["raw_metrics"]["hist"])
-            total_latency_sec += data["raw_metrics"]["total_inference_time_sec"]
-            total_frames += data["raw_metrics"]["total_frames"]
+            total_sampling_sec += data["raw_metrics"].get("total_sampling_time_sec", 0.0)
+            total_model_sec += data["raw_metrics"].get("total_model_time_sec", 0.0)
+            total_fusion_sec += data["raw_metrics"].get("total_fusion_time_sec", 0.0)
+            total_e2e_sec += data["raw_metrics"].get("total_e2e_time_sec", 0.0)
+
+            node_frames = data["raw_metrics"]["total_frames"]
+            total_oversampling += data["raw_metrics"].get("average_oversampling", 1.0) * node_frames
+            total_interpolated_percentage += data["raw_metrics"].get("average_interpolated_percentage", 0.0) * node_frames
+            total_frames_processed += node_frames
+            cleanup_iterations += data["raw_metrics"].get("cleanup_iterations", 0)
 
         # Calculate final metrics globally
         ious = np.diag(total_hist) / (total_hist.sum(1) + total_hist.sum(0) - np.diag(total_hist)) * 100
         accs = np.diag(total_hist) / total_hist.sum(1) * 100
-        avg_latency_ms = (total_latency_sec / total_frames) * 1000 if total_frames > 0 else 0
+
+        # Calculate per-frame metrics
+        avg_sampling_ms = (total_sampling_sec / total_frames_processed) * 1000 if total_frames_processed > 0 else 0
+        avg_model_ms = (total_model_sec / total_frames_processed) * 1000 if total_frames_processed > 0 else 0
+        avg_fusion_ms = (total_fusion_sec / total_frames_processed) * 1000 if total_frames_processed > 0 else 0
+        avg_e2e_ms = (total_e2e_sec / total_frames_processed) * 1000 if total_frames_processed > 0 else 0
+        avg_oversampling = total_oversampling / total_frames_processed if total_frames_processed > 0 else 1.0
+        avg_cleanup_iterations = cleanup_iterations / total_frames_processed if total_frames_processed > 0 else 0
+        avg_interpolated_percentage = total_interpolated_percentage / total_frames_processed if total_frames_processed > 0 else 0.0
+
 
         final_metrics = {
             "event": "evaluation_completed",
@@ -608,7 +640,14 @@ class ClusterOrchestrator:
                 "overall_accuracy": round(np.diag(total_hist).sum() / total_hist.sum() * 100, 4),
                 "mean_accuracy": round(np.nanmean(accs), 4),
                 "mean_iou": round(np.nanmean(ious), 4),
-                "average_latency_ms": round(avg_latency_ms, 4),
+                "sampling_latency_ms": round(avg_sampling_ms, 4),
+                "model_latency_ms": round(avg_model_ms, 4),
+                "fusion_latency_ms": round(avg_fusion_ms, 4),
+                "total_e2e_latency_ms": round(avg_e2e_ms, 4),
+                "average_oversampling_factor": round(avg_oversampling, 4),
+                "average_interpolated_percentage": round(avg_interpolated_percentage, 4),
+                "cleanup_iterations": cleanup_iterations,
+                "average_cleanup_iterations": round(avg_cleanup_iterations, 4),
                 "per_class_iou": {str(i): round(val, 4) for i, val in enumerate(ious)},
                 "per_class_acc": {str(i): round(val, 4) for i, val in enumerate(accs)}
             }
