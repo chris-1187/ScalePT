@@ -10,7 +10,7 @@ args:
   dataset: "kitti"
 
 ## Infrastructure
-# Coordinator node (Host 1), owns the nfs
+# Primary worker node (Host 1), owns the NFS
 primary_node:
   name: "host1"
   ip: "141.23.40.76"
@@ -21,19 +21,16 @@ worker_nodes:
   - name: "host1"
     ip: "141.23.40.76"
     training_cap: 10240 # points
-    inference_cap: 400 # empirical throughput
   - name: "host2"
     ip: "141.23.40.77"
-    training_cap: 10240 # points
-    inference_cap: 400 # empirical throughput
+    training_cap: 10240
   - name: "host3"
     ip: "141.23.40.78"
-    training_cap: 10240 # points
-    inference_cap: 210 # empirical throughput
+    training_cap: 10240
 
 paths:
   local_worker_repo: "./spt-worker"       # Local worker repo path
-  remote_worker_repo: "~/spt-worker"      # Destination on Ubuntu nodes
+  remote_worker_repo: "~/spt-worker"      # Destination on worker nodes
   local_dataset: "./data/kitti/dataset"   # Local path to data
   remote_dataset: "/mnt/nfs_share/kitti/dataset"
   remote_experiments: "/mnt/nfs_share/experiments"

@@ -22,7 +22,6 @@ data/*
 
 .DS_Store
 *.egg-info/
-train.sh
 
 # Temp
-notebooks/
+notebooks/experiments/
